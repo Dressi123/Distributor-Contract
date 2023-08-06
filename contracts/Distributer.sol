@@ -269,6 +269,11 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
         return userStakes[_user];
     }
 
+    // returns an array of the user's vesting entries
+    function UserVestings(address _user) external view returns (VestingEntry[] memory) {
+        return userVestings[_user].entries;
+    }
+
     // updates the minimum stake required to be eligible for rewards
     function UpdateMinStake(uint _minStake) external {
         require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "Caller is not an admin");
