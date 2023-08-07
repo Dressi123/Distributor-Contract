@@ -15,6 +15,8 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
 
     address public treasury;
 
+    uint constant SCALE = 1e18;
+
     // roles for the contract
     bytes32 public constant DISTRIBUTOR_ROLE = keccak256("DISTRIBUTOR_ROLE");
 
@@ -24,6 +26,9 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
     uint public rewardPerStake;
     // total amount of rewards distributed to stakers so far
     uint public totalRewardsDistributed;
+
+    // total amount of rewards claimed by stakers so far
+    uint public totalRewardsClaimed;
 
     // minimum of stake required to be eligible for rewards
     uint public minStake;
@@ -122,7 +127,7 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
         insert(userVestings[msg.sender], entry);
 
         // calculate the user's rewards since their last deposit
-        uint userReward = userStakes[msg.sender] * (rewardPerStake - rewardPerStakeAtDeposit[msg.sender]);
+        uint userReward = (userStakes[msg.sender] * (rewardPerStake - rewardPerStakeAtDeposit[msg.sender])) / SCALE;
         userRewards[msg.sender] += userReward;
 
         userStakes[msg.sender] += _amount;
@@ -141,14 +146,15 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
         require(_rewardAmount > 0, "Reward amount must be greater than 0");
         require(hasRole(DISTRIBUTOR_ROLE, msg.sender), "Caller is not an approved distributor");
         require(totalStake > 0, "Nothing is staked yet, so no users to distribute to");
-        require(_rewardAmount >= totalStake, "Reward amount must be greater than or equal to the total stake");
+        //require(_rewardAmount >= totalStake, "Reward amount must be greater than or equal to the total stake");
         require(rewardToken.balanceOf(msg.sender) >= _rewardAmount, "Distributor does not have enough tokens to distribute");
+        require(rewardToken.allowance(msg.sender, address(this)) >= _rewardAmount, "Distributor has not approved the contract to spend tokens on their behalf");
         // transfer the tokens from the distributor to the contract
         rewardToken.safeTransferFrom(msg.sender, address(this), _rewardAmount);
         // we need to subtract the totalRewardsDistributed from the total tokens to get the new tokens + tokens received outside of the distribute function if any
-        uint totalTokens = rewardToken.balanceOf(address(this)) - totalRewardsDistributed;
+        uint totalTokens = rewardToken.balanceOf(address(this)) + totalRewardsClaimed - totalRewardsDistributed;
         // update the rewardPerStake to reflect the new rewards
-        rewardPerStake += totalTokens / totalStake;
+        rewardPerStake += (totalTokens * SCALE) / totalStake;
         // update the totalRewardsDistributed to keep track of the total rewards distributed
         totalRewardsDistributed += totalTokens;
         // emit an event to notify the frontend
@@ -158,11 +164,10 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
     // transfers the accumulated rewards back to the user without withdrawing the deposited tokens
     function Claim() external nonReentrant {
         require(userStakes[msg.sender] > 0, "User has no tokens staked");
-        require(userRewards[msg.sender] > 0, "User has no rewards to claim");
-        require(rewardPerStake >= rewardPerStakeAtDeposit[msg.sender], "No new rewards to claim");
+        uint userReward = (userStakes[msg.sender] * (rewardPerStake - rewardPerStakeAtDeposit[msg.sender])) / SCALE;
+        require((userRewards[msg.sender] + userReward) > 0, "User has no rewards to claim");
         // Calculate the user's reward based on their stake and the increase in rewardPerStake since their last deposit.
         // This represents the new rewards the user has accumulated.
-        uint userReward = userStakes[msg.sender] * (rewardPerStake - rewardPerStakeAtDeposit[msg.sender]);
         userRewards[msg.sender] += userReward;
 
         // calculate the total amount to be claimed
@@ -172,6 +177,8 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
 
         // update the user's total rewards claimed
         totalUserRewardsClaimed[msg.sender] += totalClaimAmount;
+        // update the total rewards claimed
+        totalRewardsClaimed += totalClaimAmount;
         // update the rewardPerStakeAtDeposit to the current rewardPerStake
         rewardPerStakeAtDeposit[msg.sender] = rewardPerStake;
         // reset the user's rewards to 0
@@ -184,6 +191,7 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
 
     // withdraws the deposited tokens + accumulated rewards back to the user
     function Withdraw(uint _amount) external nonReentrant {
+        require(_amount > 0, "Withdraw amount must be greater than 0");
         require(userStakes[msg.sender] > 0, "User has no tokens staked");
         require(userStakes[msg.sender] >= _amount, "User does not have enough tokens staked");
         if (userStakes[msg.sender] - _amount < minStake) {
@@ -194,7 +202,7 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
         uint reqWithdrawAmount = _amount;
         // Calculate the user's reward based on their stake and the increase in rewardPerStake since their last deposit.
         // This represents the new rewards the user has accumulated.
-        uint userReward = reqWithdrawAmount * (rewardPerStake - rewardPerStakeAtDeposit[msg.sender]);
+        uint userReward = (reqWithdrawAmount * (rewardPerStake - rewardPerStakeAtDeposit[msg.sender])) / SCALE;
         userRewards[msg.sender] += userReward;
         // update the totalStake
         totalStake -= reqWithdrawAmount;
@@ -205,10 +213,20 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
 
         // Remove vesting entries from the heap until the tax-free amount is found
         while (heap.entries.length > 0 && heap.entries[0].endTime <= block.timestamp && taxfreeAmount < _amount) {
-            VestingEntry memory entry = removeMin(heap);
+            VestingEntry memory entry = heap.entries[0];
             uint availableTaxFree = entry.amount;
             uint neededTaxFree = _amount - taxfreeAmount;
-            taxfreeAmount += availableTaxFree < neededTaxFree ? availableTaxFree : neededTaxFree;
+
+            if (availableTaxFree <= neededTaxFree) {
+                // If the entire amount in the entry is needed, remove the entry
+               removeMin(heap);
+               taxfreeAmount += availableTaxFree;
+            } else {
+                // If only a portion of the entry is needed, reduce the amount in the entry
+                heap.entries[0].amount -= neededTaxFree;
+                taxfreeAmount += neededTaxFree;
+                break; // Break out of the loop as we've found enough tax-free amount
+            }
         }
 
 
@@ -235,8 +253,10 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
             stakeToken.safeTransfer(treasury, taxAmount);
         }
         
-        // ipdate the user's total rewards claimed
+        // update the user's total rewards claimed
         totalUserRewardsClaimed[msg.sender] += userRewards[msg.sender];
+        // update the total rewards claimed
+        totalRewardsClaimed += userRewards[msg.sender];
 
         // update the users stake
         userStakes[msg.sender] -= reqWithdrawAmount;
@@ -255,7 +275,7 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
 
     // returns the amount of tokens that can be claimed by the user
     function ClaimableAmount(address _user) external view returns (uint) {
-        uint userReward = userStakes[_user] * (rewardPerStake - rewardPerStakeAtDeposit[_user]);
+        uint userReward = (userStakes[_user] * (rewardPerStake - rewardPerStakeAtDeposit[_user])) / SCALE;
         return userRewards[_user] + userReward;
     }
 
