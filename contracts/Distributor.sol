@@ -8,7 +8,6 @@ import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
     using SafeERC20Upgradeable for IERC20Upgradeable;
-    bool private initialized;
 
     IERC20Upgradeable public stakeToken;
     IERC20Upgradeable public rewardToken;
@@ -32,6 +31,9 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
 
     // minimum of stake required to be eligible for rewards
     uint public minStake;
+
+    // minimum distribute amount required to trigger a distribution
+    uint public minDistributeAmount;
 
     // vesting period for rewards
     uint public vestingPeriod;
@@ -66,6 +68,7 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
     event Claimed(address user, uint amount);
     event Withdrawn(address user, uint stakeTokenAmount, uint rewardTokenAmount);
     event MinStakeUpdated(uint newMinStake);
+    event MinDistributeUpdated(uint newMinDistribute);
     event VestingPeriodUpdated(uint newVestingPeriod);
     event TaxRateUpdated(uint newTaxRate);
     event TreasuryUpdated(address newTreasury);
@@ -76,14 +79,13 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
     // initializes the contract with the given token address (only called once during deployment)
     function initialize(
         IERC20Upgradeable _stakeToken, IERC20Upgradeable _rewardToken, 
-        address _treasury, uint _minimumStake, 
+        address _treasury, uint _minimumStake, uint _minDistributeAmount,
         uint _vestingPeriod, uint _taxRate
     ) public initializer {
-        require(!initialized, "Contract instance has already been initialized");
         require(_treasury != address(0), "Treasury address cannot be 0x0");
         require(_minimumStake > 0, "Minimum stake must be greater than 0");
+        require(_minDistributeAmount > 0, "Minimum distribute amount must be greater than 0");
         require(_vestingPeriod > 0, "Vesting period must be greater than 0");
-        initialized = true;
 
         // set up the roles for the contract
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -98,6 +100,7 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
 
         // set the minimum stake to the given amount (in its smallest denomination)
         minStake = _minimumStake;
+        minDistributeAmount = _minDistributeAmount;
 
         // set the vesting period to the given amount (in seconds)
         vestingPeriod = _vestingPeriod;
@@ -114,6 +117,10 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
 
     // allows the contract owner to update the contract using the UUPS proxy pattern
     function _authorizeUpgrade(address) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
+
+    receive () external payable {
+        revert("Contract does not accept ETH");
+    }
 
     // deposits the given amount of tokens to the contract and updates the user's stake
     function Deposit(uint _amount) external {
@@ -143,7 +150,7 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
 
     // distributes the given amount of tokens to all stakers based on their stake
     function Distribute(uint _rewardAmount) external {
-        require(_rewardAmount > 0, "Reward amount must be greater than 0");
+        require(_rewardAmount >= minDistributeAmount, "Reward amount must be greater than minimum distribute amount");
         require(hasRole(DISTRIBUTOR_ROLE, msg.sender), "Caller is not an approved distributor");
         require(totalStake > 0, "Nothing is staked yet, so no users to distribute to");
         //require(_rewardAmount >= totalStake, "Reward amount must be greater than or equal to the total stake");
@@ -229,7 +236,6 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
             }
         }
 
-
         uint rewardTokenWithdrawAmount = userRewards[msg.sender];
         require(rewardToken.balanceOf(address(this)) >= rewardTokenWithdrawAmount, "Contract does not have enough tokens to pay out rewards");
         uint stakeTokenWithdrawAmount = 0;
@@ -246,6 +252,20 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
             taxAmount = taxableAmount * taxRate / 100;
             // Calculate total withdrawal amount including tax-free and taxable amounts minus the tax
             stakeTokenWithdrawAmount += taxfreeAmount + (taxableAmount - taxAmount);
+
+            // Update vesting for the taxable amount
+            while(heap.entries.length > 0 && taxableAmount > 0) {
+                VestingEntry memory entry = heap.entries[0];
+                if (entry.amount <= taxableAmount) {
+                    // If the entire amount in the entry is used up, remove the entry
+                    removeMin(heap);
+                    taxableAmount -= entry.amount;
+                } else {
+                    // If only a portion of the entry is used, reduce the amount in the entry
+                    heap.entries[0].amount -= taxableAmount;
+                    taxableAmount = 0;
+                }
+            }
 
             require(stakeToken.balanceOf(address(this)) >= stakeTokenWithdrawAmount + taxAmount, "Contract does not have enough tokens");
 
@@ -302,6 +322,14 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
         emit MinStakeUpdated(_minStake);
     }
 
+    // updates the minimum distribute amount
+    function UpdateMinDistributeAmount(uint _minDisAmount) external {
+        require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "Caller is not an admin");
+        require(_minDisAmount > 0, "Minimum stake must be greater than 0");
+        minDistributeAmount = _minDisAmount;
+        emit MinDistributeUpdated(_minDisAmount);
+    }
+
     // updates the vesting period
     function UpdateVestingPeriod(uint _vestingPeriod) external {
         require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "Caller is not an admin");
@@ -348,13 +376,6 @@ contract Distributor is Initializable, AccessControlUpgradeable, ReentrancyGuard
         //require(_token != address(token), "Cannot recover the staked token");
         IERC20Upgradeable(_token).safeTransfer(msg.sender, _amount);
         emit Recovered(_token, _amount);
-    }
-
-    // Emergency function to recover any Ether
-    function EmergencyRecoverETH(uint _amount) external {
-        require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "Caller is not an admin");
-        payable(msg.sender).transfer(_amount);
-        emit Recovered(address(0), _amount);
     }
 
     function insert(MinHeap storage heap, VestingEntry memory entry) internal {

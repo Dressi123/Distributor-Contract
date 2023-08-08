@@ -6,16 +6,17 @@ const {
 const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
 
-const StakeTokenSupply = BigInt("39026949359163005") * 10n ** 9n;
-const RewardTokenSupply = BigInt("1000000000000000000") * 10n ** 6n;
+const StakeTokenSupply = BigInt("1000000000000000000") * 10n ** 9n;
+const RewardTokenSupply = BigInt("39026949359163005") * 10n ** 6n;
 const minimumStake = BigInt(250000 * 10 ** 9);
+const minDistributeAmount = BigInt(1 * 10 ** 6);
 const SCALE = BigInt(10 ** 18);
 
 describe("Testing", async function () {
 
     async function deployStakeTokenFixture() {
         const StakeToken = await ethers.getContractFactory("StakeToken");
-        const stakeToken = await StakeToken.deploy(BigInt("39026949359163005"));
+        const stakeToken = await StakeToken.deploy(BigInt("1000000000000000000"));
         await stakeToken.waitForDeployment();
 
         return { stakeToken };
@@ -23,7 +24,7 @@ describe("Testing", async function () {
 
     async function deployRewardTokenFixture() {
         const RewardToken = await ethers.getContractFactory("RewardToken");
-        const rewardToken = await RewardToken.deploy(BigInt("1000000000000000000"));
+        const rewardToken = await RewardToken.deploy(BigInt("39026949359163005"));
         await rewardToken.waitForDeployment();
 
         return { rewardToken };
@@ -37,7 +38,7 @@ describe("Testing", async function () {
         const Distributor = await ethers.getContractFactory("Distributor");
         const distributor = await upgrades.deployProxy(Distributor, [
             stakeToken, rewardToken, treasury,
-            minimumStake, vestingPeriod, taxRate,
+            minimumStake, minDistributeAmount, vestingPeriod, taxRate,
         ], { initializer: 'initialize', kind: 'uups' }
         );
 
@@ -84,6 +85,7 @@ describe("Testing", async function () {
         it("Should set access roles correctly", async function () {
             const [owner] = await ethers.getSigners();
             const DEFAULT_ADMIN_ROLE = "0x0000000000000000000000000000000000000000000000000000000000000000";
+            console.log(ethers.keccak256(ethers.toUtf8Bytes("DISTRIBUTOR_ROLE")))
             expect(await Distributor.hasRole(DEFAULT_ADMIN_ROLE, owner.address)).to.be.true;
             expect(await Distributor.hasRole(ethers.keccak256(ethers.toUtf8Bytes("DISTRIBUTOR_ROLE")), owner.address)).to.be.true;
         });
@@ -97,7 +99,7 @@ describe("Testing", async function () {
             const taxRate = 10;
             await expect(Distributor.initialize(
                 stakeTokenAddress, rewardTokenAddress, treasuryAddress,
-                minimumStake, vestingPeriod, taxRate
+                minimumStake, minDistributeAmount, vestingPeriod, taxRate
             )).to.be.revertedWith("Initializable: contract is already initialized");
         });
 
@@ -261,20 +263,20 @@ describe("Testing", async function () {
                 const distributorAddress = await Distributor.getAddress();
 
                 await StakeToken.approve(distributorAddress, Amount);
-                await expect(Distributor.Distribute(Amount)).to.be.revertedWith("Reward amount must be greater than 0");
+                await expect(Distributor.Distribute(Amount)).to.be.revertedWith("Reward amount must be greater than minimum distribute amount");
             });
 
             it("Should revert if caller is not an approved distributor", async function () {
                 const [owner, treasury] = await ethers.getSigners();
-                const Amount = 1;
+                const Amount = minDistributeAmount;
 
-                await StakeToken.approve(treasury.address, Amount);
+                await RewardToken.approve(treasury.address, Amount);
                 await expect(Distributor.connect(treasury).Distribute(Amount)).to.be.revertedWith("Caller is not an approved distributor");
             });
 
             it("Should revert if nothing has been staked yet", async function () {
                 const [owner, treasury] = await ethers.getSigners();
-                const Amount = 100000;
+                const Amount = minDistributeAmount;
 
                 const stakeTokenAddress = await StakeToken.getAddress();
                 const rewardTokenAddress = await RewardToken.getAddress();
@@ -332,7 +334,7 @@ describe("Testing", async function () {
             it("Should distribute tokens to all users", async function () {
                 const [owner, treasury, addr3, addr4] = await ethers.getSigners();
 
-                const amount = 1n * 10n ** 6n;
+                const amount = minDistributeAmount;
 
                 const distributorAddress = await Distributor.getAddress();
 
@@ -477,7 +479,7 @@ describe("Testing", async function () {
 
             });
 
-            /* it("Should distribute rewards to 100x users ", async function () {
+            it("Should distribute rewards to 100x users ", async function () {
                 const [owner, treasury] = await ethers.getSigners();
 
                 const stakeTokenAddress = await StakeToken.getAddress();
@@ -516,7 +518,7 @@ describe("Testing", async function () {
                     totalClaimable += await distributor.ClaimableAmount(user.address);
                 }
                 expect(amount - totalClaimable).to.be.lessThan(100n);
-            }); */
+            });
 
             it("Should emit event", async function () {
 
@@ -524,10 +526,10 @@ describe("Testing", async function () {
 
                 const totalStake = await Distributor.totalStake();
 
-                await RewardToken.approve(distributorAddress, totalStake);
-                await expect(Distributor.Distribute(totalStake))
+                await RewardToken.approve(distributorAddress, minDistributeAmount);
+                await expect(Distributor.Distribute(minDistributeAmount))
                     .to.emit(Distributor, "Distributed")
-                    .withArgs(totalStake, totalStake);
+                    .withArgs(minDistributeAmount, totalStake);
             });
                 
         });
@@ -656,7 +658,15 @@ describe("Testing", async function () {
 
                 const userStake = await Distributor.UserStake(addr4.address);
 
+                let userVestings = await Distributor.UserVestings(addr4.address);
+                console.log("UserVestings", userVestings);
+
                 await Distributor.connect(addr4).Withdraw(userStake);
+
+                userVestings = await Distributor.UserVestings(addr4.address);
+                console.log("UserVestings", userVestings);
+
+                expect(userVestings.length).to.equal(0);
 
                 expect(await StakeToken.balanceOf(addr4.address)).to.equal(userStake * 90n / 100n);
 
@@ -722,6 +732,7 @@ describe("Testing", async function () {
                 await Distributor.connect(addr3).Deposit(amount);
 
                 balance = await StakeToken.balanceOf(addr3.address);
+                console.log(balance);
 
                 vestings = await Distributor.UserVestings(addr3.address);
                 console.log(vestings);
@@ -730,9 +741,14 @@ describe("Testing", async function () {
 
                 await Distributor.connect(addr3).Withdraw(amount + minimumStake);
 
+                vestings = await Distributor.UserVestings(addr3.address);
+                console.log("look", vestings);
+
                 const stake = await Distributor.UserStake(addr3.address);
                 console.log(stake);
 
+                expect(vestings.length && stake).to.equal(0);
+                
                 expect(await StakeToken.balanceOf(addr3.address)).to.equal(balance + minimumStake - amount + (amount * 2n * 90n / 100n));
                 expect(await StakeToken.balanceOf(treasury.address)).to.equal(treasuryBalance + (amount * 2n * 10n / 100n));
             });
@@ -748,14 +764,24 @@ describe("Testing", async function () {
                     await time.increase(200);
                     await Distributor.connect(addr3).Deposit(amount / 10n);
                 }
+
+                const t = await time.latest();
+                console.log(t);
+                let vestings = await Distributor.UserVestings(addr3.address);
+                console.log(vestings);
+
                 const balance = await StakeToken.balanceOf(addr3.address);
                 const balance1 = await StakeToken.balanceOf(treasury.address);
                 await Distributor.connect(addr3).Withdraw(minimumStake + amount);
 
+                vestings = await Distributor.UserVestings(addr3.address);
+
+                expect(vestings.length).to.equal(0);
+
                 console.log(balance + minimumStake);
 
-                expect(await StakeToken.balanceOf(addr3.address)).to.equal(balance + minimumStake + amount / 10n * 7n + (amount / 10n * 3n * 90n/100n));
-                expect(await StakeToken.balanceOf(treasury.address)).to.equal(balance1 + (amount / 10n * 3n * 10n / 100n));
+                expect(await StakeToken.balanceOf(addr3.address)).to.equal(balance + minimumStake + amount / 10n * 5n + (amount / 10n * 5n * 90n/100n));
+                expect(await StakeToken.balanceOf(treasury.address)).to.equal(balance1 + (amount / 10n * 5n * 10n / 100n));
             });
 
             it("Should emit event", async function () {
@@ -824,6 +850,159 @@ describe("Testing", async function () {
                 expect(await Distributor.TotalUserRewardsClaimed(addr5.address)).to.equal(totalUserRewardsClaimed + claimable);
             });
 
+            it("UpdateMinStake reverts if user is not authenticated", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+
+                await expect(Distributor.connect(addr3).UpdateMinStake(1000))
+                    .to.be.revertedWith("Caller is not an admin");
+            });
+
+            it("UpdateMinStake updates correctly", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+
+                await expect(Distributor.UpdateMinStake(0)).to.be.revertedWith("Minimum stake must be greater than 0");
+
+                await expect(Distributor.UpdateMinStake(minimumStake + 1n)).to
+                    .emit(Distributor, 'MinStakeUpdated')
+                    .withArgs(minimumStake + 1n);
+            });
+
+            it("UpdateMinDistributeAmount reverts if user is not authenticated", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+
+                await expect(Distributor.connect(addr3).UpdateMinDistributeAmount(minDistributeAmount))
+                    .to.be.revertedWith("Caller is not an admin");
+            });
+
+            it("UpdateMinDistributeAmount updates correctly", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+
+                await expect(Distributor.UpdateMinDistributeAmount(minDistributeAmount + 1n)).to
+                    .emit(Distributor, 'MinDistributeUpdated')
+                    .withArgs(minDistributeAmount + 1n);
+            });
+
+
+            it("UpdateVestingPeriod reverts if user is not authenticated", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+    
+                await expect(Distributor.connect(addr3).UpdateVestingPeriod(1000))
+                    .to.be.revertedWith("Caller is not an admin");
+            })
+    
+            it("UpdateVestingPeriod updates correctly", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+    
+                await expect(Distributor.UpdateVestingPeriod(0)).to.be.revertedWith("Vesting period must be greater than 0");
+    
+                await expect(Distributor.UpdateVestingPeriod(1001)).to
+                    .emit(Distributor, 'VestingPeriodUpdated')
+                    .withArgs(1001);
+    
+                expect(await Distributor.vestingPeriod()).to.equal(1001);
+            });
+    
+            it("UpdateTaxRate reverts if user is not authenticated", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+    
+                await expect(Distributor.connect(addr3).UpdateTaxRate(10))
+                    .to.be.revertedWith("Caller is not an admin");
+            });
+    
+            it("UpdateTaxRate updates correctly", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+    
+                await expect(Distributor.UpdateTaxRate(101)).to.be.revertedWith("Tax rate must be between 0 and 100");
+    
+                await expect(Distributor.UpdateTaxRate(9)).to
+                    .emit(Distributor, 'TaxRateUpdated')
+                    .withArgs(9);
+    
+                expect(await Distributor.taxRate()).to.equal(9);
+            });
+    
+            it("UpdateTreasury reverts if user is not authenticated", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+    
+                await expect(Distributor.connect(addr3).UpdateTreasury(addr3.address))
+                    .to.be.revertedWith("Caller is not an admin");
+            });
+    
+            it("UpdateTreasury updates correctly", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+    
+                await expect(Distributor.UpdateTreasury(owner.address)).to
+                    .emit(Distributor, 'TreasuryUpdated')
+                    .withArgs(owner.address);
+    
+                expect(await Distributor.treasury()).to.equal(owner.address);
+            });
+    
+            it("UpdateStakeToken reverts if user is not authenticated", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+    
+                await expect(Distributor.connect(addr3).UpdateStakeToken(addr3.address))
+                    .to.be.revertedWith("Caller is not an admin");
+            });
+    
+            it("UpdateStakeToken updates correctly", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+    
+                await expect(Distributor.UpdateStakeToken(owner.address)).to
+                    .emit(Distributor, 'StakeTokenUpdated')
+                    .withArgs(owner.address);
+    
+                expect(await Distributor.stakeToken()).to.equal(owner.address);
+            });
+    
+            it("UpdateRewardToken reverts if user is not authenticated", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+    
+                await expect(Distributor.connect(addr3).UpdateRewardToken(addr3.address))
+                    .to.be.revertedWith("Caller is not an admin");
+            });
+    
+            it("UpdateRewardToken updates correctly", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+    
+                await expect(Distributor.UpdateRewardToken(owner.address)).to
+                    .emit(Distributor, 'RewardTokenUpdated')
+                    .withArgs(owner.address);
+    
+                expect(await Distributor.rewardToken()).to.equal(owner.address);
+            });
+
+            it("EmergencyRecoverTokens reverts if user is not authenticated", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+    
+                await expect(Distributor.connect(addr3).EmergencyRecoverTokens(addr3.address, 100))
+                    .to.be.revertedWith("Caller is not an admin");
+            });
+
+            it("EmergencyRecoverTokens recovers correctly", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+
+                const prevBalance = await StakeToken.balanceOf(owner.address);
+                const distributorAddress = await Distributor.getAddress();
+                const prevBalance1 = await StakeToken.balanceOf(distributorAddress);
+
+                const stakeTokenAddress = await StakeToken.getAddress();
+    
+                await expect(Distributor.EmergencyRecoverTokens(stakeTokenAddress, 100)).to
+                    .emit(Distributor, 'Recovered')
+                    .withArgs(stakeTokenAddress, 100);
+                
+                expect(await StakeToken.balanceOf(owner.address)).to.equal(prevBalance + 100n);
+                expect(await StakeToken.balanceOf(distributorAddress)).to.equal(prevBalance1 - 100n);
+            });
+
+            it("Not possible to send eth to contract", async function () {
+                const [owner, treasury, addr3] = await ethers.getSigners();
+
+                const distributorAddress = await Distributor.getAddress();
+    
+                await expect(owner.sendTransaction({ to: distributorAddress, value: 100 })).to.be.revertedWith("Contract does not accept ETH");
+            });
         });
         
     });     
