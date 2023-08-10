@@ -1,6 +1,7 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("hardhat-gas-reporter");
 require("@openzeppelin/hardhat-upgrades");
+require("dotenv").config();
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
@@ -15,8 +16,9 @@ module.exports = {
   },
   networks: {
     sepolia: {
-      url: `${process.env.INFURA_URL}${process.env.INFURA_KEY}`,
-      accounts: [process.env.PRIVATE_KEY]
+      url: `https://sepolia.infura.io/v3/${process.env.INFURA_KEY}`,
+      accounts: [process.env.PRIVATE_KEY],
+
     },
   },
   gasReporter: {
